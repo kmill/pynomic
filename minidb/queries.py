@@ -6,10 +6,18 @@ import util
 from util import assert_type
 import itertools
 
+class InconsistentData(Exception) :
+    pass
+
 def select(data, queryfunc) :
-    return [v for p, v in queryfunc.query.execute(Bindings(queryfunc.var, (None, data)))]
+    """Selects everything from data which is returned by the query function."""
+    return [v for p, v in queryfunc.query.execute(Fuel(), Bindings(queryfunc.var, (Path(), data)))]
 
 def remove(data, queryfunc) :
+    """Removes everything from 'data' which the query function returns from it.
+
+    The data is untouched unless either the function returns
+    successfully or InconsistentData is raised."""
     dbvar = queryfunc.var
     query = queryfunc.query
     paths = {}
@@ -28,14 +36,14 @@ def remove(data, queryfunc) :
                 return parentPaths.setdefault(path.key, {})
         else :
             return None
-    for p, v in query.execute(Bindings(dbvar, (None, data))) :
+    for p, v in query.execute(Fuel(), Bindings(dbvar, (Path(), data))) :
         if p is None :
             raise Exception("Cannot remove an element which did not come directly from the database.")
         addPath(p, True)
 
     def removePaths(data, paths) :
         if paths is None :
-            raise Exception("Unexpected path removal.")
+            raise InconsistentData("Unexpected path removal.")
         if type(data) is dict :
             for k, subpath in paths.iteritems() :
                 if subpath is None :
@@ -51,7 +59,62 @@ def remove(data, queryfunc) :
                     removePaths(data[k], subpath)
             for i in reversed(sorted(todelete)) :
                 del data[i]
-    removePaths(data, paths)
+    try :
+        removePaths(data, paths)
+    except InconsistentData :
+        raise
+    except Exception as x :
+        raise InconsistentData(str(x))
+
+def update(data, queryfunc, changes) :
+    rootbinding = Bindings(queryfunc.var, (Path(), data))
+    res = list(queryfunc.query.execute(Fuel(), rootbinding))
+    instructions = []
+    for p, v in res :
+        newdata = []
+        instructions.append(newdata)
+        for change in changes :
+            p2, v2 = change.valuefunc.value.eval(Fuel(), Bindings(change.valuefunc.var, (None, v), parent=rootbinding))
+            newdata.append(v2)
+    try :
+        for (p, v), newdata in zip(res, instructions) :
+            for change, new in zip(changes, newdata) :
+                changepath = p.concat(change.path)
+                if changepath is None or (changepath.parent is None and changepath.key is None) :
+                    raise Exception("Cannot insert an object with None path")
+                attachmentPoint = data
+                if changepath.parent is not None :
+                    attachmentPoint = changepath.parent.get(attachmentPoint)
+                if change.append :
+                    attachmentPoint = attachmentPoint.setdefault(path.key, [])
+                    if type(attachmentPoint) is not list :
+                        raise Exception("Cannot append to non-list")
+                    attachmentPoint.append(new)
+                else :
+                    attachmentPoint[changepath.key] = new
+    except Exception as x :
+        raise InconsistentData(str(x))
+
+class ToUpdate(object) :
+    def __init__(self, path, valuefunc, append=False) :
+        self.path = assert_type(path, Path)
+        self.valuefunc = assert_type(valuefunc, ValueFunc)
+        self.append = append
+
+class OutOfFuel(Exception) :
+    pass
+
+class Fuel(object) :
+    """Represents some amount of fuel.  When the fuel runs out, it
+    throws OutOfFuel.  The purpose is to limit queries somehow.  The
+    default is an amount where a loop taking that many iterations
+    takes about a second."""
+    def __init__(self, amount=10000000) :
+        self.amount = amount
+    def consume(self) :
+        self.amount -= 1
+        if self.amount <= 0 :
+            raise OutOfFuel()
 
 class Bindings(object) :
     def __init__(self, key=None, value=None, parent=None) :
@@ -76,7 +139,7 @@ class Bindings(object) :
         return repr(pairs)
 
 class Query(object) :
-    def execute(self, bindings) :
+    def execute(self, fuel, bindings) :
         """Returns [(path, data)]"""
         raise Exception("Unimplemented")
     def __ge__(self, other) :
@@ -96,9 +159,37 @@ class Query(object) :
             raise NotImplemented()
 
 class Value(object) :
-    def eval(self, bindings) :
+    def eval(self, fuel, bindings) :
         """Returns (path, data)."""
         raise NotImplemented()
+
+class ValueFunc(object) :
+    def __init__(self, var, value) :
+        self.var = var
+        if isinstance(var, Var) :
+            self.var = var.name
+        self.value = assert_type(value, Value)
+    def __call__(self, arg) :
+        return Apply(arg, self)
+    def __repr__(self) :
+        return "ValueFunc(%r, %r)" % (self.var, self.value)
+
+@util.add_assert_type_coercion(ValueFunc)
+def coerce_callable_to_valuefunc(f) :
+    if callable(f) :
+        return valuefunc(f)
+
+class Apply(Value) :
+    def __init__(self, value, func) :
+        self.value = assert_type(value, Value)
+        self.func = assert_type(func, ValueFunc)
+    def eval(self, fuel, bindings) :
+        fuel.consume()
+        v = self.value.eval(fuel, bindings)
+        subbindings = bindings
+        if self.func.var is not None :
+            subbindings = bindings.extend(self.func.var, v)
+        return self.func.value.eval(fuel, subbindings)
 
 class Get(Query, Value) :
     def __init__(self, source, *pathparts) :
@@ -107,16 +198,22 @@ class Get(Query, Value) :
             self.path = pathparts[0]
         else :
             self.path = path(*pathparts)
-    def execute(self, bindings) :
+    def execute(self, fuel, bindings) :
         path = self.path
-        source = path.get(self.source.eval(bindings)[1])
+        pathprime, data = self.source.eval(fuel, bindings)
+        def makepath(k) :
+            if pathprime is not None :
+                return pathprime.concat(path)[k]
+            else :
+                return None
+        source = path.get(data)
         if type(source) is dict :
-            return ((path[k], v) for k,v in source.iteritems())
+            return ((makepath(k), v) for k,v in source.iteritems())
         else :
-            return ((path[i], v) for i,v in itertools.izip(itertools.count(), source))
-    def eval(self, bindings) :
+            return ((makepath(i), v) for i,v in itertools.izip(itertools.count(), source))
+    def eval(self, fuel, bindings) :
         path = self.path
-        itspath, value = self.source.eval(bindings)
+        itspath, value = self.source.eval(fuel, bindings)
         value = path.get(value)
         return (itspath.concat(path) if itspath is not None else None, value)
     def __repr__(self) :
@@ -128,21 +225,30 @@ class Func(object) :
         if isinstance(var, Var) :
             self.var = var.name
         self.query = assert_type(query, Query)
+    def __call__(self, arg) :
+        return Bind(Return(arg), self)
     def __repr__(self) :
         return "Func(%r, %r)" % (self.var, self.query)
+
+@util.add_assert_type_coercion(Func)
+def coerce_callable_to_valuefunc(f) :
+    if callable(f) :
+        return queryfunc(f)
 
 class Bind(Query) :
     def __init__(self, query, func) :
         self.query = assert_type(query, Query)
         self.func = assert_type(func, Func)
-    def execute(self, bindings) :
+    def execute(self, fuel, bindings) :
         var = self.func.var
         funcquery = self.func.query
-        for r in self.query.execute(bindings) :
+        for r in self.query.execute(fuel, bindings) :
+            fuel.consume()
             subbindings = bindings
             if var is not None :
                 subbindings = bindings.extend(var, r)
-            for r2 in funcquery.execute(subbindings) :
+            for r2 in funcquery.execute(fuel, subbindings) :
+                fuel.consume()
                 yield r2
     def __repr__(self) :
         return "Bind(%r, %r)" % (self.query, self.func)
@@ -150,9 +256,9 @@ class Bind(Query) :
 class Union(Query) :
     def __init__(self, *queries) :
         self.queries = [assert_type(q, Query) for q in queries]
-    def execute(self, bindings) :
+    def execute(self, fuel, bindings) :
         for q in self.queries :
-            for r in q.execute(bindings) :
+            for r in q.execute(fuel, bindings) :
                 yield r
     def __repr__(self) :
         return "Union(*%r)" % self.queries
@@ -160,16 +266,16 @@ class Union(Query) :
 class Return(Query) :
     def __init__(self, value) :
         self.value = value if isinstance(value, Value) else Constant(value)
-    def execute(self, bindings) :
-        return [self.value.eval(bindings)]
+    def execute(self, fuel, bindings) :
+        return [self.value.eval(fuel, bindings)]
     def __repr__(self) :
         return "Return(%r)" % self.value
 
 class Require(Query) :
     def __init__(self, value) :
         self.value = value if isinstance(value, Value) else Constant(value)
-    def execute(self, bindings) :
-        if self.value.eval(bindings)[1] :
+    def execute(self, fuel, bindings) :
+        if self.value.eval(fuel, bindings)[1] :
             return [(None, ())]
         else :
             return []
@@ -179,7 +285,7 @@ class Require(Query) :
 class Constant(Value) :
     def __init__(self, o) :
         self.o = o
-    def eval(self, bindings) :
+    def eval(self, fuel, bindings) :
         return (None, self.o)
     def __repr__(self) :
         return "Constant(%r)" % self.o
@@ -187,7 +293,7 @@ class Constant(Value) :
 class Var(Value) :
     def __init__(self, name) :
         self.name = assert_type(name, basestring)
-    def eval(self, bindings) :
+    def eval(self, fuel, bindings) :
         return bindings[self.name]
     def __repr__(self) :
         return "Var(%r)" % self.name
@@ -198,20 +304,20 @@ x, y, z = Var("x"), Var("y"), Var("z")
 class AsList(Value) :
     def __init__(self, query) :
         self.query = assert_type(query, Query)
-    def eval(self, bindings) :
-        return (None, [r[1] for r in self.query.execute(bindings)])
+    def eval(self, fuel, bindings) :
+        return (None, [r[1] for r in self.query.execute(fuel, bindings)])
     def __repr__(self) :
         return "AsList(%r)" % self.query
 
 class AsDict(Value) :
     def __init__(self, query) :
         self.query = assert_type(query, Query)
-    def eval(self, bindings) :
+    def eval(self, fuel, bindings) :
         def make_key(p) :
             if p is None :
                 return p
             return p.key
-        return (None, dict((make_key(r[0]), r[1]) for r in self.query.execute(bindings)))
+        return (None, dict((make_key(r[0]), r[1]) for r in self.query.execute(fuel, bindings)))
     def __repr__(self) :
         return "AsList(%r)" % self.query
 
@@ -222,8 +328,8 @@ class Op(Value) :
         self.name = name
         self.op = util.allowed_operations[name]
         self.params = [p if isinstance(p, Value) else Constant(p) for p in params]
-    def eval(self, bindings) :
-        eparams = [p.eval(bindings)[1] for p in self.params]
+    def eval(self, fuel, bindings) :
+        eparams = [p.eval(fuel, bindings)[1] for p in self.params]
         return (None, self.op(*eparams))
     def __repr__(self) :
         return "Op(%r, *%r)" % (self.name, self.params)
@@ -231,10 +337,10 @@ class Op(Value) :
 class Or(Value) :
     def __init__(self, *params) :
         self.params = [p if isinstance(p, Value) else Constant(p) for p in params]
-    def eval(self, bindings) :
+    def eval(self, fuel, bindings) :
         r = None
         for p in self.params :
-            r = p.eval(bindings)
+            r = p.eval(fuel, bindings)
             if r[1] :
                 return r
         if r == None :
@@ -246,10 +352,10 @@ class Or(Value) :
 class And(Value) :
     def __init__(self, *params) :
         self.params = [p if isinstance(p, Value) else Constant(p) for p in params]
-    def execute(self, bindings) :
+    def execute(self, fuel, bindings) :
         r = None
         for p in self.params :
-            r = p.eval(bindings)
+            r = p.eval(fuel, bindings)
             if not r[1] :
                 return r
         if r == None :
@@ -318,9 +424,9 @@ class Do(Query) :
         'var <- m' syntax in Haskell."""
         self.binds.append((var, query))
         return self
-    def foreach_(self, query) :
-        """Run a query dropping its values.  Like '_ <- m' syntax in
-        Haskell."""
+    def reteach(self, query) :
+        """Run a query, not binding its values.  If not in the
+        terminal position, like '_ <- m' syntax in Haskell."""
         self.binds.append((None, query))
         return self
     def ret(self, value) :
@@ -344,15 +450,21 @@ class Do(Query) :
             else :
                 builtq = Bind(q, Func(v, builtq))
         self.query = builtq
-    def execute(self, bindings) :
+    def execute(self, fuel, bindings) :
         """Builds the query then executes it."""
         self.buildQuery()
-        return self.query.execute(bindings)
+        return self.query.execute(fuel, bindings)
     def __repr__(self) :
         self.buildQuery()
         return repr(self.query)
 
-def queryfunc(f, nextvar=[1]) :
+def genvar(prefix="genvar", nextvar=[1]) :
+    v = Var(prefix + str(nextvar[0]))
+    nextvar[0] += 1
+    return v
+
+
+def queryfunc(f) :
     """A "decorator" which passes in a newly generated variable to the
     given function to make a query function of it.
 
@@ -374,9 +486,9 @@ def queryfunc(f, nextvar=[1]) :
                      Func(a, Bind(somecondition(a),
                                   Func(None, Return(a))))))
     """
-    def genvar(prefix="genvar") :
-        v = Var(prefix + str(nextvar[0]))
-        nextvar[0] += 1
-        return v
     v = genvar(f.func_code.co_varnames[0])
     return Func(v, f(v))
+
+def valuefunc(f) :
+    v = genvar(f.func_code.co_varnames[0])
+    return ValueFunc(v, f(v))

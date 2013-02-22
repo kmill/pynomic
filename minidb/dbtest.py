@@ -27,6 +27,14 @@ if __name__=="__main__" :
                
     #print db.select(query)
 
+    db.update(lambda db : Do()
+              .foreach(a, Get(db, "users"))
+              .reteach(Get(a, "numbers")),
+              [ToUpdate(Path(), lambda x : Op("add", x, 1))])
+
+    print db.data
+
+    exit(0)
 
     def testThread() :
         print "In thread"

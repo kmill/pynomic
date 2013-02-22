@@ -6,13 +6,30 @@ import operator
 import threading
 import types
 
+assert_type_coercions = {}
+
 def assert_type(o, t) :
     """Returns o.  But, if it is not an instance of t, raises an
     exception."""
     if isinstance(o, t) :
         return o
     else :
+        for f in assert_type_coercions.get(t, []) :
+            try :
+                return f(o)
+            except CoerceError :
+                pass
         raise TypeError("expecting type " + str(t))
+
+class CoerceError(Exception) :
+    pass
+
+def add_assert_type_coercion(t) :
+    def _add_assert_type_coercion(f) :
+        global assert_type_coercions
+        assert_type_coercions.setdefault(t, []).append(f)
+        return f
+    return _add_assert_type_coercion
 
 allowed_operations = {
     "lt" : operator.lt,
