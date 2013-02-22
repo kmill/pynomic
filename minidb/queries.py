@@ -91,12 +91,13 @@ def update(data, queryfunc, changes) :
                         raise Exception("Cannot append to non-list")
                     attachmentPoint.append(new)
                 elif change.newkey :
+                    moved_data = change.path.get(v)
                     del attachmentPoint[changepath.key]
-                    attachmentPoint[new] = v
+                    attachmentPoint[new] = moved_data
                 else :
                     attachmentPoint[changepath.key] = new
     except Exception as x :
-        raise InconsistentData(str(x))
+        raise InconsistentData(repr(x))
 
 class ToUpdate(object) :
     def __init__(self, path, valuefunc, append=False, newkey=False) :

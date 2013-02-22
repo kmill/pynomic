@@ -44,9 +44,20 @@ if __name__=="__main__" :
     db.update(lambda db : Get(db, "users"),
               [ToUpdate(Path(), getUsername, newkey=True)])
 
+    # renames the "numbers" subtables to "noombers"
+    db.update(lambda db : Get(db, "users"),
+              [ToUpdate(Path("numbers"), lambda x : "noombers", newkey=True)])
+
     # renames every table in the database to "a"
     db.update(lambda db : Get(db),
               [ToUpdate(Path(), lambda x : "a", newkey=True)])
+
+    # this should error out: trying to change the key to "a", but
+    # that's outside of the jurisdiction of the update due to the
+    # subpath.
+#     db.update(lambda db : Return(Get(db)),
+#               [ToUpdate(Path(), lambda x : "a", newkey=True)],
+#               subpath=path("a"))
 
     print db.data
 
