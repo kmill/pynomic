@@ -86,20 +86,26 @@ def update(data, queryfunc, changes) :
                 if changepath.parent is not None :
                     attachmentPoint = changepath.parent.get(attachmentPoint)
                 if change.append :
-                    attachmentPoint = attachmentPoint.setdefault(path.key, [])
+                    attachmentPoint = attachmentPoint.setdefault(changepath.key, [])
                     if type(attachmentPoint) is not list :
                         raise Exception("Cannot append to non-list")
                     attachmentPoint.append(new)
+                elif change.newkey :
+                    del attachmentPoint[changepath.key]
+                    attachmentPoint[new] = v
                 else :
                     attachmentPoint[changepath.key] = new
     except Exception as x :
         raise InconsistentData(str(x))
 
 class ToUpdate(object) :
-    def __init__(self, path, valuefunc, append=False) :
+    def __init__(self, path, valuefunc, append=False, newkey=False) :
+        if append and newkey :
+            raise Exception("Not both 'append' and 'newkey' can be True")
         self.path = assert_type(path, Path)
         self.valuefunc = assert_type(valuefunc, ValueFunc)
         self.append = append
+        self.newkey = newkey
 
 class OutOfFuel(Exception) :
     pass
@@ -163,6 +169,13 @@ class Value(object) :
         """Returns (path, data)."""
         raise NotImplemented()
 
+@util.add_assert_type_coercion(Value)
+def coerce_basic_types_to_constant(v) :
+    if type(v) in util.allowed_types :
+        return Constant(v)
+    else :
+        raise util.CoerceError()
+
 class ValueFunc(object) :
     def __init__(self, var, value) :
         self.var = var
@@ -178,6 +191,8 @@ class ValueFunc(object) :
 def coerce_callable_to_valuefunc(f) :
     if callable(f) :
         return valuefunc(f)
+    else :
+        raise util.CoerceError()
 
 class Apply(Value) :
     def __init__(self, value, func) :
@@ -234,6 +249,8 @@ class Func(object) :
 def coerce_callable_to_valuefunc(f) :
     if callable(f) :
         return queryfunc(f)
+    else :
+        raise util.CoerceError()
 
 class Bind(Query) :
     def __init__(self, query, func) :
@@ -265,7 +282,7 @@ class Union(Query) :
 
 class Return(Query) :
     def __init__(self, value) :
-        self.value = value if isinstance(value, Value) else Constant(value)
+        self.value = assert_type(value, Value)
     def execute(self, fuel, bindings) :
         return [self.value.eval(fuel, bindings)]
     def __repr__(self) :
@@ -273,7 +290,7 @@ class Return(Query) :
 
 class Require(Query) :
     def __init__(self, value) :
-        self.value = value if isinstance(value, Value) else Constant(value)
+        self.value = assert_type(value, Value)
     def execute(self, fuel, bindings) :
         if self.value.eval(fuel, bindings)[1] :
             return [(None, ())]
@@ -327,7 +344,7 @@ class Op(Value) :
             raise Exception("Operation for Op must be allowed, not " + name)
         self.name = name
         self.op = util.allowed_operations[name]
-        self.params = [p if isinstance(p, Value) else Constant(p) for p in params]
+        self.params = [assert_type(p, Value) for p in params]
     def eval(self, fuel, bindings) :
         eparams = [p.eval(fuel, bindings)[1] for p in self.params]
         return (None, self.op(*eparams))
@@ -336,7 +353,7 @@ class Op(Value) :
 
 class Or(Value) :
     def __init__(self, *params) :
-        self.params = [p if isinstance(p, Value) else Constant(p) for p in params]
+        self.params = [assert_type(p, Value) for p in params]
     def eval(self, fuel, bindings) :
         r = None
         for p in self.params :
@@ -351,7 +368,7 @@ class Or(Value) :
         return "Or(*%r)" % (self.params,)
 class And(Value) :
     def __init__(self, *params) :
-        self.params = [p if isinstance(p, Value) else Constant(p) for p in params]
+        self.params = [assert_type(p, Value) for p in params]
     def execute(self, fuel, bindings) :
         r = None
         for p in self.params :

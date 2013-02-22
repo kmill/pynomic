@@ -27,10 +27,26 @@ if __name__=="__main__" :
                
     #print db.select(query)
 
+    # adds 1 to everyone's numbers
     db.update(lambda db : Do()
               .foreach(a, Get(db, "users"))
               .reteach(Get(a, "numbers")),
               [ToUpdate(Path(), lambda x : Op("add", x, 1))])
+    # adds 22 to everyone's list of numbers
+    db.update(lambda db : Get(db, "users"),
+              [ToUpdate(Path()["numbers"], lambda x : 22, append=True)])
+    # sets the username of scott to skook
+    db.update(lambda db : Return(Get(db, "users", "scott")),
+              [ToUpdate(Path()["username"], lambda x : "skook")])
+    def getUsername(x) :
+        return Get(x, "username")
+    # sets the key for every user to their username
+    db.update(lambda db : Get(db, "users"),
+              [ToUpdate(Path(), getUsername, newkey=True)])
+
+    # renames every table in the database to "a"
+    db.update(lambda db : Get(db),
+              [ToUpdate(Path(), lambda x : "a", newkey=True)])
 
     print db.data
 

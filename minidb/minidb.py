@@ -18,6 +18,7 @@ class Database(object) :
         self.backingFile = os.path.abspath(backingFile)
         self.lock = util.RWLock()
         self.rollback(warn=False)
+        self.logger.info("%r initialized")
     def commit(self) :
         """Commits the database to disk by first saving it to a
         temporary file and then copying it over the old database file."""
